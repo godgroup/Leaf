@@ -158,6 +158,17 @@ public class SegmentIDGenImpl implements IDGen {
             buffer.setUpdateTimestamp(System.currentTimeMillis());
             buffer.setMinStep(leafAlloc.getStep());//leafAlloc中的step为DB中的step
         } else {
+            /**
+             * Leaf动态调整Step
+             *
+             * 假设服务QPS为Q，号段长度为L，号段更新周期为T，那么Q * T = L
+             * 最开始L长度是固定的，导致随着Q的增长，T会越来越小。但是Leaf本质的需求是希望T是固定的。那么如果L可以和Q正相关的话，T就可以趋近一个定值了
+             * 所以Leaf每次更新号段的时候，根据上一次更新号段的周期T和号段长度step，来决定下一次的号段长度nextStep：
+             *
+             * 1. T < 15min，nextStep = step * 2
+             * 2. 15min < T < 30min，nextStep = step
+             * 3. T > 30min，nextStep = step / 2
+             */
             long duration = System.currentTimeMillis() - buffer.getUpdateTimestamp();
             int nextStep = buffer.getStep();
             if (duration < SEGMENT_DURATION) {
@@ -169,12 +180,16 @@ public class SegmentIDGenImpl implements IDGen {
             } else if (duration < SEGMENT_DURATION * 2) {
                 //do nothing with nextStep
             } else {
+                // 保证步长调整后 不会小于 数据库中的步长
                 nextStep = nextStep / 2 >= buffer.getMinStep() ? nextStep / 2 : nextStep;
             }
+
             logger.info("leafKey[{}], step[{}], duration[{}mins], nextStep[{}]", key, buffer.getStep(), String.format("%.2f",((double)duration / (1000 * 60))), nextStep);
             LeafAlloc temp = new LeafAlloc();
             temp.setKey(key);
             temp.setStep(nextStep);
+
+            // 用调整后的步长 step 更新数据库
             leafAlloc = dao.updateMaxIdByCustomStepAndGetLeafAlloc(temp);
             buffer.setUpdateTimestamp(System.currentTimeMillis());
             buffer.setStep(nextStep);
@@ -246,6 +261,10 @@ public class SegmentIDGenImpl implements IDGen {
         }
     }
 
+    /**
+     * 等待预获取线程执行完，最多等待一秒
+     * @param buffer
+     */
     private void waitAndSleep(SegmentBuffer buffer) {
         int roll = 0;
         while (buffer.getThreadRunning().get()) {
